@@ -2,13 +2,13 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const crypto = require('crypto');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 
-// ── CONFIG ──
 const JWT_SECRET = 'yakeen_super_secret_2026';
+const RAZORPAY_WEBHOOK_SECRET = 'yakeen_webhook_secret_2026';
 
-// ── FIREBASE INIT ──
 initializeApp({
   credential: cert({
     projectId: "instagram-3a749",
@@ -18,8 +18,10 @@ initializeApp({
 });
 
 const db = getFirestore();
-
 const app = express();
+
+// ── WEBHOOK needs raw body ──
+app.use('/api/webhook/razorpay', express.raw({ type: 'application/json' }));
 app.use(cors());
 app.use(express.json());
 
@@ -89,13 +91,32 @@ app.get('/api/auth/me', auth, async (req, res) => {
   }
 });
 
-// ── MARK PAID ──
-app.post('/api/payment/confirm', auth, async (req, res) => {
+// ── RAZORPAY WEBHOOK ──
+app.post('/api/webhook/razorpay', async (req, res) => {
   try {
-    await db.collection('users').doc(req.user.phone).update({ isPaid: true });
-    res.json({ success: true });
+    const signature = req.headers['x-razorpay-signature'];
+    const body = req.body;
+    const hmac = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET);
+    hmac.update(body);
+    const digest = hmac.digest('hex');
+    if (digest !== signature) {
+      console.error('Invalid webhook signature');
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+    const event = JSON.parse(body);
+    if (event.event === 'payment.captured' || event.event === 'payment_link.paid') {
+      const contact = event.payload?.payment?.entity?.contact ||
+                      event.payload?.payment_link?.entity?.customer_details?.contact;
+      if (contact) {
+        const phone = contact.replace('+91', '').replace(/\D/g, '');
+        await db.collection('users').doc(phone).update({ isPaid: true });
+        console.log('User unlocked:', phone);
+      }
+    }
+    res.json({ status: 'ok' });
   } catch (err) {
-    res.status(500).json({ error: 'Error' });
+    console.error('Webhook error:', err);
+    res.status(500).json({ error: 'Webhook error' });
   }
 });
 
